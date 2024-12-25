@@ -1,0 +1,264 @@
+---
+title: "615_Final_Project"
+format: pdf
+editor: visual
+---
+
+```{r}
+# Load libraries
+library(httr)     
+library(R.utils)  
+library(lubridate)
+library(readxl)
+library(dplyr)
+library(caret)
+library(zoo)
+library(lmtest)
+library(corrplot)
+library(leaps)
+library(splines)
+library(randomForest)
+```
+
+```{r}
+# Loop over desired years
+years = 2019:2023
+for (year in years){
+  url = sprintf(
+    "https://www.ncei.noaa.gov/pub/data/noaa/isd-lite/%d/725090-14739-%d.gz", 
+    year, year)
+  
+  # Define file paths for download and extraction
+  download_path = paste0("725090-14739-", year, ".gz")
+  extracted_path = paste0("725090-14739-", year, ".txt")
+  
+  # Download the .gz file
+  download.file(url, download_path, mode = "wb")
+  
+  # Extract the .gz file
+  gunzip(download_path, destname = extracted_path, overwrite = TRUE)
+}
+
+# Combine all the extracted files into one data frame
+final_df = do.call(rbind, lapply(years, function(year) {
+  extracted_path = paste0("725090-14739-", year, ".txt")
+  read.table(extracted_path, header = FALSE)
+}))
+
+# Renaming columns
+colnames = c("Year", "Month", "Day", "Hour", "Air_Temp", "Dew_Temp", 
+             "Sea_Pressure", "Wind_Direction", "Wind_Speed", 
+             "Total_Cloud_Cover", "1hr_Acc_Precip", "6hr_Acc_Precip")
+colnames(final_df) = colnames
+
+# Preview combined data
+head(final_df)
+```
+
+
+```{r}
+# Converting Air Temp and Dew Temp to Fahrenheit and adjusting Wind Speed
+final_df$Air_Temp = ((final_df$Air_Temp / 10) * (9/5)) + 32
+final_df$Dew_Temp = ((final_df$Dew_Temp / 10) * (9/5)) + 32
+final_df$Wind_Speed = final_df$Wind_Speed / 10
+```
+
+```{r}
+# Replace missing data with NA
+final_df[final_df == -9999] = NA
+
+# Drop or interpolate columns
+for (colnames in colnames(final_df)){
+  missing_prop = mean(is.na(final_df[[colnames]]))
+  if (missing_prop > 0.5){
+    final_df[[colnames]] = NULL  
+  }else if (missing_prop > 0 & missing_prop <= 0.5) {
+    final_df[[colnames]] <- na.approx(final_df[[colnames]], na.rm = FALSE)
+  }
+}
+```
+
+```{r}
+# Create a datetime column and convert to Eastern Time
+final_df$Date = as.POSIXct(paste(final_df$Year, final_df$Month, final_df$Day, 
+                                 final_df$Hour), format = "%Y %m %d %H", 
+                                 tz = "UTC")
+
+# Convert the time zone to America/New_York
+final_df$Date <- with_tz(final_df$Date, tzone = "America/New_York")
+
+# Define the gas_day function
+gas_day = function(time) {
+  if (hour(time) <= 9) {
+    return(as.Date(time, tz = "America/New_York") - 1)  
+  } else {
+    return(as.Date(time, tz = "America/New_York"))
+  }
+}
+
+# Apply gas_day function to create a new Gas Day column
+final_df$Gas_Day = lapply(final_df$Date, gas_day)
+
+# Aggregate data to daily level
+daily_df <- final_df %>%
+  group_by(Gas_Day) %>% 
+  summarise(across(.fns = list(mean = ~ mean(.x, na.rm = TRUE)))) %>%
+  ungroup()
+
+# Drop unnecessary columns and renaming
+colnames = c("Year", "Month", "Day", "Hour", "Air_Temp", "Dew_Temp", 
+             "Sea_Pressure", "Wind_Direction", "Wind_Speed", 
+             "Total_Cloud_Cover", "One_hr_Acc_Precip", "Six_hr_Acc_Precip")
+colnames(daily_df)[2:12] = colnames[1:11]
+drop = c("Year", "Month", "Day", "Hour", "Date", "Date_mean")
+daily_df = daily_df[, !names(daily_df) %in% drop]
+```
+
+```{r}
+# Load demand data and create Total column
+demand_df = read_excel("/Users/pirroprifti/Desktop/Projects/agt.xlsx")
+demand_df$Total = demand_df$`Residential/Commercial` + demand_df$`Power Plant`
+
+# Filter daily_df to match date range (2019-01-01 to 2022-12-31)
+daily_df = daily_df[daily_df$Gas_Day >= as.Date("2019-01-01") &
+                      daily_df$Gas_Day <= as.Date("2022-12-31"), ]
+
+# Add Total Column to daily_df
+daily_df$Demand = demand_df$Total
+```
+
+```{r}
+# Scatter plot: Air Temperature vs. Demand
+plot(data = daily_df, Demand ~ Air_Temp, main = " Response vs. Predictor", 
+     xlab = "Air Temp (Fahrenheit)", ylab = "Demand (Dth/day)", cex.axis = .9)
+```
+
+
+```{r}
+# Split data into training and test sets (2022 forecast)
+train_data <- daily_df %>% filter(Gas_Day <= as.Date("2021-12-31"))
+test_data  <- daily_df %>% filter(Gas_Day >= as.Date("2022-01-01"))
+train_data = train_data[, 2:9]
+test_data = test_data[, 2:9]
+
+# Variable selection
+rf_mod = randomForest(Demand ~ ., data = train_data, ntree = 500, 
+                      nodesize = 5, mtry = 3)
+# Extracting importance, creating data frame, and ordering
+importance_data = importance(rf_mod)
+var_imp_df = data.frame(Variables = rownames(importance_data), 
+                        Importance = importance_data[, 1])
+top_vars = var_imp_df[order(-var_imp_df$Importance), ]
+top_vars$Variables = c("Air Temp", "Dew Temp", "Sea Pressure", "Wind Direction", 
+                       "Wind Speed", "Total Cloud Cover", "1hr Acc Precip")
+# Plotting
+barplot(top_vars$Importance, ylab = "Importance", 
+        names.arg = top_vars$Variables, las = 2, 
+        main = "Variable Importance Plot", cex.names = .6, cex.axis = .7)
+```
+
+```{r}
+# First Analysis
+# Fit Polynomial Regression (degree = 3)
+model = lm(Demand ~ poly(Air_Temp, 3), data = train_data)
+summary(model)
+
+# Make predictions
+preds = predict(model, newdata = test_data, type = "response")
+total_preds = predict(model, newdata = daily_df, type = "response")
+
+# Calculate R-squared for out-of-sample performance
+osr2 = 1 - sum((test_data$Demand - preds)^2) / 
+  sum((test_data$Demand - mean(test_data$Demand))^2)
+
+# Plot the model outputs
+plot(data = daily_df, Demand ~ Air_Temp, main = " Response vs. Predictor", 
+     xlab = "Air Temp (Fahrenheit)", ylab = "Demand (Dth/day)")
+lines(x = sort(daily_df$Air_Temp), y = total_preds[order(daily_df$Air_Temp)],
+      col = "red", lwd = 3)
+```
+
+```{r}
+# Checking assumptions
+# Linearity
+# Violated, so I transformed independent variables
+
+# Normality
+plot(model, 2)
+shapiro.test(model$residuals)
+# Violated
+
+# Independence
+dwtest(model)
+# Violated, add variables or lags
+
+# Homoskedacity
+plot(model, 1)
+bptest(model)
+# Violated
+
+# Multicollinearity
+# Compute the correlation matrix
+cor_matrix = cor(poly(daily_df$Air_Temp, degree = 3))
+
+# Plot the heatmap
+corrplot(cor_matrix, 
+         method = "color", 
+         col = colorRampPalette(c("blue", "white", "red"))(200), 
+         tl.cex = 0.8, number.cex = 0.8, addCoef.col = "black", 
+         number.digits = 2, cl.pos = "r", tl.col = "black",
+         mar = c(0, 0, 1, 0)) 
+```
+
+```{r}
+# Refined model
+# Fit natural cubic splines
+weights <- 1 / ((train_data$Air_Temp)^2 + 0.1)
+model2 = lm(Demand ~ ns(Air_Temp, df = 3), weights = weights, data = train_data)
+summary(model2)
+
+# Make predictions
+preds2 = predict(model2, newdata = test_data, type = "response")
+total_preds2 = predict(model2, newdata = daily_df, type = "response")
+
+# Calculate R-squared for out-of-sample performance
+osr22 <- 1 - sum((test_data$Demand - preds2)^2) / 
+  sum((test_data$Demand - mean(test_data$Demand))^2)
+
+# Plot the model outputs
+plot(data = daily_df, Demand ~ Air_Temp, main = " Response vs. Predictor", 
+     xlab = "Air Temp (Fahrenheit)", ylab = "Demand (Dth/day)")
+lines(x = sort(daily_df$Air_Temp), y = total_preds2[order(daily_df$Air_Temp)],
+      col = "red", lwd = 3)
+```
+
+```{r}
+# Checking assumptions
+# Independence
+weight_res = model2$residuals * sqrt(weights)
+dwtest(weight_res ~ 1)
+# Violated
+
+# Homoskedacity
+plot(model2, 3)
+bptest(model2)
+# Fixed with weighting model
+```
+
+```{r}
+# Create the base plot
+plot(as.Date(daily_df$Gas_Day[1097:1461]), test_data$Demand, type = "l", col = "red", 
+     lwd = 2, xlab = "Time", ylab = "Demand", main = "Forecast vs Actuals")
+
+# Add the polynomial forecast as a dashed blue line
+lines(daily_df$Gas_Day[1097:1461], preds, col = "blue", lty = 2, lwd = 1)
+
+# Add the tree forecast as a solid green line
+lines(daily_df$Gas_Day[1097:1461], preds2, col = "green", lty = 2, lwd = 1)
+
+# Add a legend
+legend("topright", legend = c("Actual", "Poly Forecast", "Tree Forecast"),
+       col = c("red", "blue", "green"), lty = c(1, 2, 1), lwd = 2)
+
+```
+
