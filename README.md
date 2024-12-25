@@ -1,18 +1,14 @@
 <h1>AGT Pipeline Natural Gas Forecasting</h1>
 
 <h2>Description</h2>
-Project consists of a simple PowerShell script that walks the user through "zeroing out" (wiping) any drives that are connected to the system. The utility allows you to select the target disk and choose the number of passes that are performed. The PowerShell script will configure a diskpart script file based on the user's selections and then launch Diskpart to perform the disk sanitization.
+This project focuses on predicting the AGT pipeline's natural gas demand for the year 2022 using weather data from Boston, the regional hub of the pipeline. A combination of machine learning and statistical models is employed to capture the non-linear relationship between weather variables and gas demand. The repository includes a Python script which implements regression and decision tree models for analysis in addition to an R script adapted from the Python script to align with the requirements of a graduate course in Linear Models and Regression, focusing solely on regression methods. Lastly, a comprehensive analysis and commentary rendered from an Rnw file is provided in regards to the R script code. This repository demonstrates the application of data science techniques to a real-world energy demand problem while meeting academic requirements.
 <br />
 
 
-<h2>Languages and Utilities Used</h2>
+<h2>Languages Used</h2>
 
 - <b>Python</b> 
 - <b>R</b>
-
-<h2>Environments Used </h2>
-
-- <b>Windows 10</b> (21H2)
 
 <h2>Program walk-through:</h2>
 
